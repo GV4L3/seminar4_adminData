@@ -1,0 +1,192 @@
+---
+title: 'Administrative and Government Data'
+output:
+  reprex::reprex_document:
+    venue: "gh"
+    advertise: FALSE
+    session_info: TRUE
+    style: TRUE
+    comment: "#;-)"
+    tidyverse_quiet: FALSE
+    std_out_err: TRUE
+knit: reprex::reprex_render
+---
+
+This notebook demonstrates how to import and clean administrative and government data in R.
+
+```{r}
+# install libraries if not already available 
+need <- c("tidyverse","stargazer") # list packages needed
+have <- need %in% rownames(installed.packages()) # checks packages you have
+if(any(!have)) install.packages(need[!have]) # install missing packages
+invisible(lapply(need, library, character.only=T)) # load needed packages
+ 
+# some more setup: setting up paths and folder structure if it does not yet exist
+table_dir <- "./output/tables/"
+figure_dir <- "./output/figures/"
+data_folder <- "./data/raw/"
+
+dir.create('./output')
+dir.create(table_dir)
+dir.create(figure_dir)
+dir.create('./data')
+dir.create("./data/processed") # for the processed data we might make later
+```
+
+## Read in the data from the [London Datastore](https://data.london.gov.uk/dataset/mps-stop-and-search-public-dashboard-data).
+
+We can do this two different ways. The easiest way is to simply read the data directly from the web. This method, however, would leave you at the mercy of the website maintainer who could change the data or prevent access. For replicability, the best practice is to download the raw data and save it in a data folder, which can then be used later. Another option is to read the data from the web, but save it to a local file.
+
+```{r}
+# read in the data from the web
+df <- read.csv('https://data.london.gov.uk/download/e6yjz/sjq/MPS%20Stop%20and%20Search%20Dashboard_LDS_Extract.csv')
+
+# save the data to a local file
+write.csv(df, 'data/stop_search.csv')
+
+```
+
+# Inspect the data
+
+```{r}
+df <- read.csv('data/stop_search.csv')
+
+#show snippet of data (note that we can click the arrow to see other columns)
+head(df)
+```
+
+# Let's get the distribution of crimes using the  `Reason.for.Stop` column
+
+```{r}
+
+# let's get the distribution of crimes using the  `Reason.for.Stop` column
+
+df %>% 
+  group_by(Reason.for.Stop) %>% 
+  summarise(n = n()) %>% 
+  arrange(desc(n)) %>% 
+  head(15)
+```
+
+
+# Let's get the distribution of ethnicity 
+
+```{r}
+# let's summarize the counts using the 'Ethnic.Appearance' column
+
+df %>% 
+  group_by(EthnicAppearance) %>%
+    summarise(n = n()) %>%
+    arrange(desc(n)) 
+
+
+# hmmm do we notice anything here? 
+```
+
+# Are there racial differences in whether people who are stopped are charged?  
+Let's get the probability of being targeted for a stop and search *and not being arrested*, conditional on race 
+
+$$P(\text{not arrested} | \text{stop and search}) = \frac{P(\text{not arrested and stop and search})}{P(\text{stop and search})}$$
+
+```{r}
+# let's get the probability of being targeted for a stop and search *and not being arrested*, conditional on race 
+
+# create dummy variable for being arrested and not charged 
+df$no_charge <- ifelse(df$Outcome == 'No Further Action', 1, 0)
+
+#Drop blank values and Not Stated for cleaner look
+df <- df %>%
+  filter(!EthnicAppearanceGroup %in% c("", "Not Stated"))
+
+# convert race into a factor
+df$race_factor <- as.factor(df$EthnicAppearanceGroup) #using coarser categories here (Black, White, Asian, Other)
+
+# check coding
+table(df$race_factor, useNA = "ifany")
+
+# estimate a logistic regression model
+model <- glm(no_charge ~ race_factor, data = df, family = binomial)
+summary(model)
+```
+
+# Predict probabilities for each racial group
+
+```{r}
+# Predict probabilities for each racial group
+df$predicted_prob <- predict(model, type = "response")
+
+# Calculate average probability by race
+prob_by_race <- df %>%
+  group_by(race_factor) %>%
+  summarise(mean_prob = mean(predicted_prob))
+
+print(prob_by_race)
+```
+
+# Are the differences statistically significant?
+
+```{r}
+# Are the differences 'statistically significant' at an alpha of 0.05?
+
+# Get predicted probabilities & confidence intervals from the logistic model
+preds <- predict(model, type = "response", se.fit = TRUE)
+
+# Add predictions to the dataset
+df$predicted_prob <- preds$fit
+df$lower_ci <- preds$fit - 1.96 * preds$se.fit  # 95% lower CI
+df$upper_ci <- preds$fit + 1.96 * preds$se.fit  # 95% upper CI
+
+# Aggregate by race to get average predicted probability & confidence intervals
+plot_data <- df %>%
+  group_by(race_factor) %>%
+  summarise(
+    mean_prob = mean(predicted_prob),
+    lower_ci = mean(lower_ci),
+    upper_ci = mean(upper_ci)
+  )
+
+plot_data
+```
+
+# Visualize the results
+```{r}
+# Visualize the results
+ggplot(plot_data, aes(y = race_factor, x = mean_prob)) +
+  geom_point() +
+  geom_errorbarh(aes(xmin = lower_ci, xmax = upper_ci), height = 0.2) +
+  labs(
+    x = "Probability of not being charged after stop and search",
+    y = "Police stop and search",
+    title = "Probability of not being charged after stop and search by police"
+  )
+```
+
+
+# Save the table and figure
+```{r}
+# Save the table
+write.csv(plot_data, paste0(table_dir, "stop_search_probabilities.csv"), row.names = FALSE)
+# save the figure 
+ggsave(paste0(figure_dir, "stop_search_probabilities.png"), width = 6, height = 4)
+
+```
+
+# Alternatively, we could have directly calculated...
+```{r}
+# define function that uses Bayes Rule
+prob_no_arrest_given_stop <- function(data) {
+  data %>%
+    group_by(race_factor) %>%
+    summarise(
+      n_stops = n(),
+      n_no_charge = sum(no_charge, na.rm = TRUE),
+      P_not_arrested_given_stop = mean(no_charge, na.rm = TRUE)
+    ) %>%
+    ungroup()
+}
+
+#apply to latest data
+prob_no_arrest_given_stop(df)
+```
+## Note that this is often called the *hit rate complement*, where *hit rate* is defined as $$P(\text{arrested} | \text{stop and search}) $$
+
